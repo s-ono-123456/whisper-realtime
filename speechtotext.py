@@ -12,7 +12,7 @@ class WhisperTranscriber:
     SILENCE_THRESHOLD = 1e-4  # 無音判定の閾値
     SILENCE_TRIGGER_SEC = 5e-2  # 無音が何秒続いたら文字起こしするか
 
-    def __init__(self, model_size='large-v3', language='ja'):
+    def __init__(self, model_size='large-v3', language='ja', mic_index=None, loopback_index=None):
         """
         Whisper音声認識クラス
         """
@@ -24,11 +24,25 @@ class WhisperTranscriber:
         self.chunk_duration = 3
         self.chunks_per_inference = int(self.sample_rate * self.chunk_duration)
         
+        # デバイスインデックス
+        self.mic_index = mic_index
+        self.loopback_index = loopback_index
+        
         # スレッディング用キュー
         self.audio_queue = queue.Queue()
         self.stop_event = threading.Event()
         
         self.language = language
+        # 2つのバッファ
+        self.mic_buffer = queue.Queue()
+        self.loopback_buffer = queue.Queue()
+
+    def list_input_devices(self):
+        print("利用可能な入力デバイス一覧:")
+        for i in range(self.pyaudio.get_device_count()):
+            info = self.pyaudio.get_device_info_by_index(i)
+            if info.get('maxInputChannels', 0) > 0:
+                print(f"  [{i}] {info['name']} (Channels: {info['maxInputChannels']})")
 
     def transcribe_audio(self):
         """
@@ -78,27 +92,62 @@ class WhisperTranscriber:
             except Exception as e:
                 print(f"推論中にエラー: {e}")
 
-    def audio_callback(self, in_data, frame_count, time_info, status):
-        """
-        音声データ処理用コールバック
-        """
+    def mic_callback(self, in_data, frame_count, time_info, status):
         audio_chunk = np.frombuffer(in_data, dtype=np.float32)
-        self.audio_queue.put(audio_chunk)
+        self.mic_buffer.put(audio_chunk)
+        return (None, pyaudio.paContinue)
+
+    def loopback_callback(self, in_data, frame_count, time_info, status):
+        audio_chunk = np.frombuffer(in_data, dtype=np.float32)
+        self.loopback_buffer.put(audio_chunk)
         return (None, pyaudio.paContinue)
 
     def start_recording(self):
         """
-        音声録音開始
+        マイク・ループバック録音開始
         """
-        self.stream = self.pyaudio.open(
+        # マイクストリーム
+        self.mic_stream = self.pyaudio.open(
             format=pyaudio.paFloat32,
             channels=1,
             rate=self.sample_rate,
             input=True,
+            input_device_index=self.mic_index,
             frames_per_buffer=self.chunks_per_inference,
-            stream_callback=self.audio_callback,
+            stream_callback=self.mic_callback,
         )
-        print("音声録音を開始")
+        # ループバックストリーム
+        self.loopback_stream = self.pyaudio.open(
+            format=pyaudio.paFloat32,
+            channels=1,
+            rate=self.sample_rate,
+            input=True,
+            input_device_index=self.loopback_index,
+            frames_per_buffer=self.chunks_per_inference,
+            stream_callback=self.loopback_callback,
+        )
+        print("マイク・ループバック録音を開始")
+        # ミックス用スレッド
+        self.mix_thread = threading.Thread(target=self.mix_audio)
+        self.mix_thread.daemon = True
+        self.mix_thread.start()
+
+    def mix_audio(self):
+        """
+        マイクとループバックの音声をミックスしてキューに入れる
+        """
+        while not self.stop_event.is_set():
+            try:
+                mic_chunk = self.mic_buffer.get(timeout=1)
+                loop_chunk = self.loopback_buffer.get(timeout=1)
+                # 長さが違う場合は短い方に合わせる
+                min_len = min(len(mic_chunk), len(loop_chunk))
+                mixed = mic_chunk[:min_len] + loop_chunk[:min_len]
+                # 正規化（クリッピング防止）
+                mixed = np.clip(mixed, -1.0, 1.0)
+                self.audio_queue.put(mixed)
+            except queue.Empty:
+                continue
 
     def keyboard_listener(self):
         """
@@ -127,14 +176,27 @@ class WhisperTranscriber:
         keyboard_thread.start()
         transcribe_thread.join()
         self.stop_event.set()
-        self.stream.stop_stream()
-        self.stream.close()
+        self.mic_stream.stop_stream()
+        self.mic_stream.close()
+        self.loopback_stream.stop_stream()
+        self.loopback_stream.close()
         self.pyaudio.terminate()
 
 def main():
+    p = pyaudio.PyAudio()
+    print("利用可能な入力デバイス一覧:")
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        if info.get('maxInputChannels', 0) > 0:
+            print(f"  [{i}] {info['name']} (Channels: {info['maxInputChannels']})")
+    p.terminate()
+    mic_index = int(input("マイクのデバイス番号を入力してください: "))
+    loopback_index = int(input("ループバック（ステレオミキサー等）のデバイス番号を入力してください: "))
     transcriber = WhisperTranscriber(
         model_size='small',  
-        language='ja'
+        language='ja',
+        mic_index=mic_index,
+        loopback_index=loopback_index
     )
     transcriber.run()
 
