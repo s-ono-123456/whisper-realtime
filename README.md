@@ -42,7 +42,30 @@ python speechtotext.py
 ## 注意事項
 - Whisperモデルのダウンロードには初回のみ時間がかかります。
 - マイクデバイスが複数ある場合、デフォルト以外を使う場合は`pyaudio.open`の引数を調整してください。
+- 手動でキャッシュを配置する場合は以下の構成になるように格納してください。
+  `C:\Users\<ユーザー名>\.cache\huggingface\hub`
+    models--Systran--faster-whisper-base
+      ├ blobs : データなし
+      ├ refs
+      │   └ main : コミットハッシュのみが記載されたテキストファイル
+      └ snapshots
+          └ <コミットハッシュ>
+              ├ config.json
+              ├ model.bin
+              ├ tokenizer.json
+              └ vocabulary.txt
 
+    models--Systran--faster-whisper-large-v3
+      ├ blobs : データなし
+      ├ refs
+      │   └ main : コミットハッシュのみが記載されたテキストファイル
+      └ snapshots
+          └ <コミットハッシュ>
+              ├ config.json
+              ├ model.bin
+              ├ preprocessor_config.json
+              ├ tokenizer.json
+              └ vocabulary.txt
 
 ## 参考
 Virtual Audio Cableを利用して作成。ループバック音声はこちらで取得
