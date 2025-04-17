@@ -9,9 +9,10 @@ import threading
 
 
 class WhisperTranscriber:
-    SILENCE_THRESHOLD = 5e-3  # 無音判定の閾値
+    SILENCE_THRESHOLD = 1e-4  # 無音判定の閾値
+    SILENCE_TRIGGER_SEC = 5e-2  # 無音が何秒続いたら文字起こしするか
 
-    def __init__(self, model_size='base', language='ja'):
+    def __init__(self, model_size='large-v3', language='ja'):
         """
         Whisper音声認識クラス
         """
@@ -31,40 +32,47 @@ class WhisperTranscriber:
 
     def transcribe_audio(self):
         """
-        リアルタイム音声文字起こし
+        無音が一定時間続いた場合、または10秒以上文字起こししていない場合に文字起こし
         """
         if self.model is None:
             print("モデルの初期化に失敗しました")
             return
 
-        audio_data = []
+        audio_buffer = []
+        silence_duration = 0.0
+        last_audio_time = time.time()
+        last_transcribe_time = time.time()
+        TRANSCRIBE_INTERVAL = 10.0  # 10秒
+
         while not self.stop_event.is_set():
             try:
                 chunk = self.audio_queue.get(timeout=1)
-                audio_data.extend(chunk)
+                audio_buffer.extend(chunk)
+                audio_np = np.array(chunk)
+                now = time.time()
+                # 無音判定
+                if np.abs(audio_np).mean() < self.SILENCE_THRESHOLD:
+                    silence_duration += now - last_audio_time
+                else:
+                    silence_duration = 0.0
+                last_audio_time = now
 
-                if len(audio_data) >= self.chunks_per_inference:
-                    # テンソル変換
-                    audio_np = np.array(audio_data[:self.chunks_per_inference])
-                    
-                    # 無音判定
-                    if np.abs(audio_np).mean() < self.SILENCE_THRESHOLD:
-                        # 無音の場合はスキップ
-                        audio_data = audio_data[self.chunks_per_inference:]
-                        continue
-                    
-                    # 推論を実行
+                # 無音が一定時間続いた、または10秒以上文字起こししていない場合
+                if ((silence_duration >= self.SILENCE_TRIGGER_SEC or (now - last_transcribe_time) >= TRANSCRIBE_INTERVAL)
+                    and len(audio_buffer) > 0):
+                    audio_np_full = np.array(audio_buffer)
+                    print("文字起こしを実行")
                     results, info = self.model.transcribe(
-                        audio_np, 
+                        audio_np_full,
                         language=self.language
                     )
-                    
                     for result in results:
                         print(f"文字起こし結果: {result.text}")
                         with open("output.txt", "a", encoding="utf-8") as f:
                             f.write(result.text + "\n")
-                    audio_data = audio_data[self.chunks_per_inference:]
-
+                    audio_buffer = []
+                    silence_duration = 0.0
+                    last_transcribe_time = now
             except queue.Empty:
                 continue
             except Exception as e:
